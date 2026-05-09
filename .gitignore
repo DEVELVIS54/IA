@@ -1,1 +1,1 @@
-.env
+.env  #pour empecher le commite du fichien .env
