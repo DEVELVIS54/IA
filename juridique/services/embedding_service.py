@@ -1,7 +1,7 @@
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 from juridique.models import ChunkDocument
-
+# embeding des deux coter et qui ne coute pas cher
 class EmbeddingService:
     def __init__(self):
         print("Chargement du modele d'embedding...")
