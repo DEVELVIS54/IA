@@ -8,6 +8,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import get_user_model
 from .serializers import InscriptionSerializer, UserSerializer
 from .serializers import CustomTokenObtainPairSerializer
+from .serializers import InscriptionSerializer, UserSerializer, ChangePasswordSerializer
 
 User = get_user_model()
 
@@ -41,3 +42,18 @@ class MeView(APIView):
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+  
+  
+  
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(
+            data=request.data, context={'request': request}
+        )
+        if serializer.is_valid():
+            request.user.set_password(serializer.validated_data['new_password'])
+            request.user.save()
+            return Response({'message': 'Mot de passe modifié.'})
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
