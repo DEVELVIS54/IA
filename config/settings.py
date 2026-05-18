@@ -1,7 +1,7 @@
 from pathlib import Path
 from decouple import config
 from datetime import timedelta
-
+from rest_framework.throttling import AnonRateThrottle
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = config('SECRET_KEY')
@@ -83,6 +83,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '10/hour',
         'user': '100/hour',
+        'login': '5/minute',
     },
 }
 
@@ -95,7 +96,7 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# ── CORS ─────────────────────────────────────────────────────────────────────
+# ── CORS ──────────────────────────────────────────────────────────────────────
 CORS_ALLOW_ALL_ORIGINS = config('DEBUG', default=False, cast=bool)
 CORS_ALLOWED_ORIGINS = config(
     'CORS_ALLOWED_ORIGINS',
@@ -107,7 +108,6 @@ X_FRAME_OPTIONS = 'DENY'
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 
-# En production uniquement
 if not config('DEBUG', default=False, cast=bool):
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
@@ -116,10 +116,10 @@ if not config('DEBUG', default=False, cast=bool):
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 # ── UPLOAD ────────────────────────────────────────────────────────────────────
-DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
-FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 
-# ── LOCALISATION ─────────────────────────────────────────────────────────────
+# ── LOCALISATION ──────────────────────────────────────────────────────────────
 LANGUAGE_CODE = 'fr-fr'
 TIME_ZONE = 'Africa/Ouagadougou'
 USE_I18N = True
@@ -133,8 +133,7 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ── API KEYS ──────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
-ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+GROQ_API_KEY = config('GROQ_API_KEY', default='')
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 LOGGING = {
@@ -157,7 +156,8 @@ LOGGING = {
         },
     },
 }
-# Cache Redis
+
+# ── CACHE REDIS ───────────────────────────────────────────────────────────────
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
@@ -165,6 +165,8 @@ CACHES = {
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
         },
-        'TIMEOUT': 3600,  # cache pendant 1 heure
+        'TIMEOUT': 3600,
     }
 }
+
+

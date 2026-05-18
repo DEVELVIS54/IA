@@ -9,7 +9,8 @@ from django.contrib.auth import get_user_model
 from .serializers import InscriptionSerializer, UserSerializer
 from .serializers import CustomTokenObtainPairSerializer
 from .serializers import InscriptionSerializer, UserSerializer, ChangePasswordSerializer
-
+from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import AnonRateThrottle
 User = get_user_model()
 
 class InscriptionRateThrottle(AnonRateThrottle):
@@ -33,8 +34,12 @@ class InscriptionView(APIView):
             serializer.errors,
             status=status.HTTP_400_BAD_REQUEST
         )
+class LoginRateThrottle(AnonRateThrottle):
+    scope = 'login'
+
 
 class CustomTokenObtainPairView(TokenObtainPairView):
+    throttle_classes = [LoginRateThrottle]
     serializer_class = CustomTokenObtainPairSerializer
 
 class MeView(APIView):
@@ -57,3 +62,6 @@ class ChangePasswordView(APIView):
             request.user.save()
             return Response({'message': 'Mot de passe modifié.'})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+class LoginRateThrottle(AnonRateThrottle):
+    scope = 'login'

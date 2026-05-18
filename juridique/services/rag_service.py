@@ -1,128 +1,195 @@
-from pgvector.django import CosineDistance
-from anthropic import Anthropic
-from django.conf import settings
-from django.core.cache import cache
+# juridique/services/rag_service.py
 import hashlib
-import json
-from juridique.models import ChunkDocument, Conversation, Message
+from django.core.cache import cache
+from openai import OpenAI
+from django.conf import settings
+from pgvector.django import CosineDistance
+from juridique.models import ChunkDocument, Message
 from .embedding_service import EmbeddingService
+
+SYSTEM_PROMPT = """Tu es FasoX IA, un assistant juridique conversationnel spécialisé en droit burkinabè.
+
+═══════════════════════════════════════
+PERSONNALITÉ
+═══════════════════════════════════════
+- Tu es chaleureux, professionnel et accessible
+- Tu converses naturellement comme un humain
+- Tu utilises "je", "nous", tu poses des questions de clarification si besoin
+- Tu mémorises le fil de la conversation et tu y fais référence
+- Tu réponds TOUJOURS en français
+
+═══════════════════════════════════════
+COMPORTEMENT SELON LE TYPE DE MESSAGE
+═══════════════════════════════════════
+
+1. CONVERSATION GÉNÉRALE (salutations, remerciements, questions personnelles) :
+   → Réponds naturellement et chaleureusement, comme un humain
+
+2. QUESTIONS JURIDIQUES (droit du travail, pénal, civil, foncier, commercial...) :
+   → Réponds en professionnel avec tes connaissances en droit burkinabè
+   → Si des documents pertinents sont fournis, base-toi dessus en priorité
+   → Cite les articles de référence (ex: "Selon l'Art. 71 du Code du travail...")
+   → Structure ta réponse clairement
+   → Conclus par : "⚠️ Cette information est donnée à titre indicatif et ne remplace pas l'avis d'un juriste qualifié."
+
+3. QUESTIONS HORS CONTEXTE JURIDIQUE :
+   → Décline poliment et redirige vers le juridique
+
+═══════════════════════════════════════
+RÈGLES DE QUALITÉ
+═══════════════════════════════════════
+- Ne recopie JAMAIS les textes bruts des documents
+- Analyse, synthétise et explique en termes simples
+- Si tu n'es pas sûr, dis-le honnêtement"""
+
+SIMILARITY_THRESHOLD = 0.48
+
+MOTS_HORS_CONTEXTE = [
+    'météo', 'cuisine', 'recette', 'sport', 'football', 'musique',
+    'film', 'cinéma', 'jeu', 'voyage', 'tourisme', 'santé', 'médecin',
+    'informatique', 'programmation', 'crypto', 'bitcoin', 'blague'
+]
+
 
 class RAGService:
     def __init__(self):
         self.embedding_service = EmbeddingService()
-        self.client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self.client = OpenAI(
+            api_key=settings.GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1"
+        )
+        self.model = "llama-3.3-70b-versatile"
 
-    def rechercher_contexte(self, question, top_k=5):
-        # Clé de cache basée sur la question
-        cache_key = f"rag_contexte:{hashlib.md5(question.encode()).hexdigest()}"
+    def _est_hors_contexte(self, question: str) -> bool:
+        q = question.lower()
+        return any(mot in q for mot in MOTS_HORS_CONTEXTE)
 
-        # Vérifier le cache
-        cached = cache.get(cache_key)
-        if cached:
-            print(f"Cache HIT pour : {question[:50]}")
-            return cached
+    def _est_conversationnel(self, question: str) -> bool:
+        mots_conv = [
+            'bonjour', 'bonsoir', 'salut', 'merci', 'au revoir',
+            'bonne journée', 'bonne nuit', 'comment vas', 'ça va',
+            'ok', 'super', 'parfait', "d'accord", 'compris',
+            'très bien', 'bien reçu', 'entendu'
+        ]
+        q = question.lower().strip()
+        return any(q.startswith(m) or q == m for m in mots_conv) or len(question.split()) <= 3
 
-        # Pas en cache → chercher dans pgvector
-        question_embedding = self.embedding_service.generer_embedding(question)
+    def _get_cache_key(self, question: str) -> str:
+        q_normalized = question.lower().strip()
+        return f"fasox_rag_{hashlib.md5(q_normalized.encode()).hexdigest()}"
+
+    def _chercher_contexte(self, question: str, top_k: int = 5) -> list:
+        embedding = self.embedding_service.generer_embedding(question)
         chunks = (
             ChunkDocument.objects
-            .annotate(distance=CosineDistance('embedding', question_embedding))
-            .order_by('distance')
-            .select_related('document')[:top_k]
+            .annotate(distance=CosineDistance('embedding', embedding))
+            .order_by('distance')[:top_k]
         )
+        return [c for c in chunks if (1 - c.distance) >= SIMILARITY_THRESHOLD]
 
-        # Préparer les données pour le cache
-        chunks_data = [{
-            'contenu': c.contenu,
-            'categorie': c.document.categorie,
-            'distance': float(c.distance)
-        } for c in chunks]
+    def _construire_historique(self, conversation) -> list:
+        messages = []
+        for m in conversation.messages.order_by('created_at')[:10]:
+            messages.append({"role": m.role, "content": m.contenu})
+        return messages
 
-        # Sauvegarder en cache (1 heure)
-        cache.set(cache_key, chunks_data, 3600)
-        print(f"Cache MISS pour : {question[:50]}")
+    def _construire_messages(self, question: str, conversation) -> list:
+        historique = self._construire_historique(conversation)
+        messages_api = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        return chunks_data
+        if historique:
+            messages_api += historique
 
-    def construire_prompt(self, question, chunks, historique):
-        contexte = "\n\n---\n\n".join([
-            f"[{c['categorie'].upper()}] {c['contenu']}"
-            for c in chunks
-        ]) if chunks else "Aucun document juridique indexe."
+        if self._est_conversationnel(question):
+            messages_api.append({"role": "user", "content": question})
+            return messages_api
 
-        historique_texte = ""
-        for m in historique:
-            role = "Utilisateur" if m.role == "user" else "Assistant"
-            historique_texte += f"{role} : {m.contenu}\n"
+        if self._est_hors_contexte(question):
+            messages_api.append({"role": "user", "content": question})
+            return messages_api
 
-        prompt = f"""Contexte juridique :
+        chunks = self._chercher_contexte(question)
+
+        if chunks:
+            contexte = "\n\n".join([
+                f"[Art. {c.numero_page}] {c.contenu}" for c in chunks
+            ])
+            user_content = f"""[EXTRAITS DOCUMENTS JURIDIQUES]
 {contexte}
 
-Historique :
-{historique_texte}
+[QUESTION]
+{question}
 
-Question : {question}"""
+Analyse ces extraits et réponds clairement. Ne recopie pas le texte brut."""
+        else:
+            user_content = f"""{question}
 
-        return prompt
+(Aucun extrait trouvé — réponds depuis tes connaissances générales en droit burkinabè)"""
 
-    def repondre(self, question, conversation):
-        # Cache de la réponse complète
-        cache_key_reponse = f"rag_reponse:{hashlib.md5(question.encode()).hexdigest()}"
-        cached_reponse = cache.get(cache_key_reponse)
+        messages_api.append({"role": "user", "content": user_content})
+        return messages_api
 
-        if cached_reponse:
-            print(f"Reponse en cache pour : {question[:50]}")
-            # Sauvegarder quand même dans l'historique
-            Message.objects.create(
-                conversation=conversation,
-                role='user',
-                contenu=question
-            )
-            Message.objects.create(
-                conversation=conversation,
-                role='assistant',
-                contenu=cached_reponse
-            )
-            if not conversation.titre:
-                conversation.titre = question[:100]
-                conversation.save()
-            return cached_reponse
+    def repondre(self, question: str, conversation) -> str:
+        # Vérifier le cache pour les questions juridiques
+        cache_key = None
+        if not self._est_conversationnel(question) and not self._est_hors_contexte(question):
+            cache_key = self._get_cache_key(question)
+            cached = cache.get(cache_key)
+            if cached:
+                Message.objects.create(
+                    conversation=conversation, role='user', contenu=question)
+                Message.objects.create(
+                    conversation=conversation, role='assistant', contenu=cached)
+                return cached
 
-        # Pas en cache → appel Claude
-        historique = conversation.messages.order_by('created_at')[:10]
-        chunks = self.rechercher_contexte(question)
-        prompt = self.construire_prompt(question, chunks, historique)
-
-        response = self.client.messages.create(
-            model="claude-haiku-4-5",
+        # Appel API
+        messages_api = self._construire_messages(question, conversation)
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages_api,
             max_tokens=1500,
-            system="""Tu es un assistant juridique specialise en droit burkinabe.
-Tu reponds UNIQUEMENT en francais.
-Tu bases tes reponses sur les textes juridiques officiels fournis.
-Tu cites toujours les articles sources.
-Tes reponses ne remplacent pas un avis d'avocat.""",
-            messages=[{"role": "user", "content": prompt}]
+            temperature=0.5,
         )
+        reponse_text = response.choices[0].message.content
 
-        reponse_texte = response.content[0].text
+        # Mettre en cache
+        if cache_key:
+            cache.set(cache_key, reponse_text, timeout=3600)
 
-        # Mettre en cache la réponse (1 heure)
-        cache.set(cache_key_reponse, reponse_texte, 3600)
-
-        # Sauvegarder dans l'historique
+        # Sauvegarder les messages
         Message.objects.create(
-            conversation=conversation,
-            role='user',
-            contenu=question
-        )
+            conversation=conversation, role='user', contenu=question)
         Message.objects.create(
-            conversation=conversation,
-            role='assistant',
-            contenu=reponse_texte
+            conversation=conversation, role='assistant', contenu=reponse_text)
+
+        return reponse_text
+
+    def repondre_stream(self, question: str, conversation):
+        import json
+        messages_api = self._construire_messages(question, conversation)
+        reponse_complete = ""
+
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages_api,
+            max_tokens=1500,
+            temperature=0.5,
+            stream=True,
         )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                reponse_complete += delta.content
+                yield f"data: {json.dumps({'text': delta.content})}\n\n"
+
+        Message.objects.create(
+            conversation=conversation, role='user', contenu=question)
+        Message.objects.create(
+            conversation=conversation, role='assistant', contenu=reponse_complete)
 
         if not conversation.titre:
             conversation.titre = question[:100]
             conversation.save()
 
-        return reponse_texte
+        yield f"data: {json.dumps({'done': True, 'conversation_id': conversation.id})}\n\n"
