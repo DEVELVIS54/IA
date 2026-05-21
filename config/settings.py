@@ -1,7 +1,7 @@
 from pathlib import Path
 from decouple import config
 from datetime import timedelta
-from rest_framework.throttling import AnonRateThrottle
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = config('SECRET_KEY')
@@ -81,15 +81,15 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '10/hour',
-        'user': '100/hour',
+        'anon': '20/hour',
+        'user': '200/hour',
         'login': '5/minute',
     },
 }
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': False,
     'ALGORITHM': 'HS256',
@@ -168,5 +168,3 @@ CACHES = {
         'TIMEOUT': 3600,
     }
 }
-
-
