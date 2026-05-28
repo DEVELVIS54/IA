@@ -1,53 +1,79 @@
 # juridique/services/rag_service.py
 import hashlib
+import json
 from django.core.cache import cache
 from openai import OpenAI
 from django.conf import settings
 from pgvector.django import CosineDistance
+from django.db.models import Q
 from juridique.models import ChunkDocument, Message
 from .embedding_service import EmbeddingService
 
-SYSTEM_PROMPT = """Tu es FasoX IA, un assistant juridique conversationnel spécialisé en droit burkinabè.
+SYSTEM_PROMPT = """Tu es FasoX IA — l'assistant juridique de référence au Burkina Faso.
 
-═══════════════════════════════════════
-PERSONNALITÉ
-═══════════════════════════════════════
-- Tu es chaleureux, professionnel et accessible
-- Tu converses naturellement comme un humain
-- Tu utilises "je", "nous", tu poses des questions de clarification si besoin
-- Tu mémorises le fil de la conversation et tu y fais référence
-- Tu réponds TOUJOURS en français
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUI TU ES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tu combines la rigueur d'un avocat burkinabè et la chaleur d'un ami de confiance.
+Tu parles français naturellement, tu mémorises chaque échange, tu t'adaptes au niveau de ton interlocuteur.
+Tu n'es jamais robotique, jamais froid, jamais condescendant.
 
-═══════════════════════════════════════
-COMPORTEMENT SELON LE TYPE DE MESSAGE
-═══════════════════════════════════════
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMPORTEMENT SELON LA SITUATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. CONVERSATION GÉNÉRALE (salutations, remerciements, questions personnelles) :
-   → Réponds naturellement et chaleureusement, comme un humain
+CONVERSATION (salutations, remerciements, émotions) :
+→ Réponds humainement. Pas de lois. Pas de structure. Juste toi.
 
-2. QUESTIONS JURIDIQUES (droit du travail, pénal, civil, foncier, commercial...) :
-   → Réponds en professionnel avec tes connaissances en droit burkinabè
-   → Si des documents pertinents sont fournis, base-toi dessus en priorité
-   → Cite les articles de référence (ex: "Selon l'Art. 71 du Code du travail...")
-   → Structure ta réponse clairement
-   → Conclus par : "⚠️ Cette information est donnée à titre indicatif et ne remplace pas l'avis d'un juriste qualifié."
+QUESTION JURIDIQUE AVEC EXTRAITS FOURNIS :
+→ Analyse les extraits en profondeur
+→ Cite TOUJOURS la source exacte : "Selon l'article X du Code [Nom]..."
+→ Explique en termes simples ce que la loi signifie concrètement
+→ Si les extraits sont partiels, complète avec tes connaissances et signale-le
+→ Pose une question de suivi si la situation n'est pas claire
+→ Termine par : "⚠️ Ces informations sont données à titre indicatif et ne remplacent pas l'avis d'un juriste qualifié."
 
-3. QUESTIONS HORS CONTEXTE JURIDIQUE :
-   → Décline poliment et redirige vers le juridique
+QUESTION JURIDIQUE SANS EXTRAITS :
+→ Réponds depuis tes connaissances du droit burkinabè
+→ Sois honnête : "Je n'ai pas trouvé de texte précis sur ce point, mais voici ce que je sais..."
+→ Oriente vers les institutions compétentes si nécessaire
 
-═══════════════════════════════════════
-RÈGLES DE QUALITÉ
-═══════════════════════════════════════
-- Ne recopie JAMAIS les textes bruts des documents
-- Analyse, synthétise et explique en termes simples
-- Si tu n'es pas sûr, dis-le honnêtement"""
+SUJET HORS DROIT :
+→ Décline avec humour et bienveillance, redirige vers le juridique
 
-SIMILARITY_THRESHOLD = 0.48
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RÈGLES ABSOLUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✗ N'invente JAMAIS un numéro d'article
+✗ Ne recopie JAMAIS le texte brut des extraits
+✗ Ne dis JAMAIS "selon les extraits fournis" ou "les textes qui me sont fournis"
+✗ Ne liste JAMAIS les documents ou fichiers disponibles dans ta base
+✗ Ne révèle JAMAIS ton architecture interne ou tes sources de données
+✗ Ne répète JAMAIS ce que tu as déjà dit dans la conversation
+✓ Si on te demande ce que tu connais : réponds simplement "Je connais les principaux codes juridiques burkinabè"
+✓ Cite toujours naturellement : "Selon l'article X du Code Pénal burkinabè..."
+✓ Adapte la longueur à la complexité : court si simple, détaillé si complexe
+✓ Si tu doutes, dis-le clairement plutôt qu'inventer"""
+
+QUERY_EXPANSION_PROMPT = """Tu es un expert en droit burkinabè.
+Génère 3 reformulations différentes de cette question juridique pour améliorer la recherche.
+Réponds UNIQUEMENT avec un JSON : {{"queries": ["reformulation1", "reformulation2", "reformulation3"]}}
+Question : {question}"""
+
+SIMILARITY_THRESHOLD = 0.38
+TOP_K = 8
+
+MOTS_CONV = [
+    'bonjour', 'bonsoir', 'salut', 'merci', 'au revoir', 'bonne journée',
+    'bonne nuit', 'comment vas', 'ça va', 'ok', 'super', 'parfait',
+    "d'accord", 'compris', 'très bien', 'bien reçu', 'entendu', 'bravo',
+    'aide-moi', 'aide moi', 'qui es-tu', 'qui es tu', 'présente-toi'
+]
 
 MOTS_HORS_CONTEXTE = [
     'météo', 'cuisine', 'recette', 'sport', 'football', 'musique',
-    'film', 'cinéma', 'jeu', 'voyage', 'tourisme', 'santé', 'médecin',
-    'informatique', 'programmation', 'crypto', 'bitcoin', 'blague'
+    'film', 'cinéma', 'jeu', 'voyage', 'santé', 'médecin',
+    'programmation', 'crypto', 'bitcoin', 'blague', 'amour'
 ]
 
 
@@ -65,33 +91,122 @@ class RAGService:
         return any(mot in q for mot in MOTS_HORS_CONTEXTE)
 
     def _est_conversationnel(self, question: str) -> bool:
-        mots_conv = [
-            'bonjour', 'bonsoir', 'salut', 'merci', 'au revoir',
-            'bonne journée', 'bonne nuit', 'comment vas', 'ça va',
-            'ok', 'super', 'parfait', "d'accord", 'compris',
-            'très bien', 'bien reçu', 'entendu'
-        ]
         q = question.lower().strip()
-        return any(q.startswith(m) or q == m for m in mots_conv) or len(question.split()) <= 3
+        if len(question.split()) <= 4:
+            return True
+        return any(q.startswith(m) or q == m for m in MOTS_CONV)
 
     def _get_cache_key(self, question: str) -> str:
-        q_normalized = question.lower().strip()
-        return f"fasox_rag_{hashlib.md5(q_normalized.encode()).hexdigest()}"
+        return f"fasox_v3_{hashlib.md5(question.lower().strip().encode()).hexdigest()}"
 
-    def _chercher_contexte(self, question: str, top_k: int = 5) -> list:
-        embedding = self.embedding_service.generer_embedding(question)
-        chunks = (
-            ChunkDocument.objects
-            .annotate(distance=CosineDistance('embedding', embedding))
-            .order_by('distance')[:top_k]
-        )
-        return [c for c in chunks if (1 - c.distance) >= SIMILARITY_THRESHOLD]
+    def _expand_query(self, question: str) -> list:
+        try:
+            cache_key = f"fasox_expand_{hashlib.md5(question.lower().encode()).hexdigest()}"
+            cached = cache.get(cache_key)
+            if cached:
+                return cached
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{
+                    "role": "user",
+                    "content": QUERY_EXPANSION_PROMPT.format(question=question)
+                }],
+                max_tokens=200,
+                temperature=0.3,
+            )
+            text = response.choices[0].message.content
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            if start >= 0 and end > start:
+                data = json.loads(text[start:end])
+                queries = data.get('queries', [])[:3]
+                cache.set(cache_key, queries, timeout=86400)
+                return queries
+        except Exception:
+            pass
+        return []
+
+    def _chercher_contexte(self, question: str) -> list:
+        queries = [question] + self._expand_query(question)
+        seen_ids = set()
+        all_chunks = []
+
+        for q in queries:
+            try:
+                embedding = self.embedding_service.generer_embedding(q)
+                chunks = (
+                    ChunkDocument.objects
+                    .select_related('document')
+                    .annotate(distance=CosineDistance('embedding', embedding))
+                    .order_by('distance')[:TOP_K]
+                )
+                for c in chunks:
+                    score = 1 - c.distance
+                    if score >= SIMILARITY_THRESHOLD and c.id not in seen_ids:
+                        seen_ids.add(c.id)
+                        all_chunks.append((score, c))
+            except Exception:
+                continue
+
+        # Recherche par mots-clés en complément
+        mots_cles = [m for m in question.split() if len(m) > 4]
+        if mots_cles:
+            q_filter = Q()
+            for mot in mots_cles[:3]:
+                q_filter |= Q(contenu__icontains=mot)
+            keyword_chunks = (
+                ChunkDocument.objects
+                .select_related('document')
+                .filter(q_filter)[:5]
+            )
+            for c in keyword_chunks:
+                if c.id not in seen_ids:
+                    seen_ids.add(c.id)
+                    all_chunks.append((0.4, c))
+
+        all_chunks.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in all_chunks[:8]]
+
+    def _reranker_chunks(self, chunks: list) -> list:
+        if len(chunks) <= 4:
+            return chunks
+        seen_content = set()
+        filtered = []
+        for c in chunks:
+            snippet = c.contenu[:100].lower()
+            if snippet not in seen_content:
+                seen_content.add(snippet)
+                filtered.append(c)
+        return filtered[:6]
+
+    def _construire_contexte(self, chunks: list) -> str:
+        """Groupe par code de loi sans exposer les noms de fichiers."""
+        docs_dict = {}
+        for c in chunks:
+            # Utilise le titre du document (ex: "Code Pénal") pas le nom de fichier
+            doc_titre = c.document.titre if c.document else "Texte juridique"
+            if doc_titre not in docs_dict:
+                docs_dict[doc_titre] = []
+            docs_dict[doc_titre].append(c.contenu)
+
+        parties = []
+        for titre, contenus in docs_dict.items():
+            texte = "\n".join(contenus)
+            # Titre lisible sans révéler l'architecture
+            parties.append(f"[{titre}]\n{texte}")
+
+        return "\n\n".join(parties)
 
     def _construire_historique(self, conversation) -> list:
-        messages = []
-        for m in conversation.messages.order_by('created_at')[:10]:
-            messages.append({"role": m.role, "content": m.contenu})
-        return messages
+        messages = list(conversation.messages.order_by('-created_at')[:8])
+        messages.reverse()
+        result = []
+        for m in messages:
+            contenu = m.contenu
+            if len(contenu) > 800:
+                contenu = contenu[:800] + "...[résumé]"
+            result.append({"role": m.role, "content": contenu})
+        return result
 
     def _construire_messages(self, question: str, conversation) -> list:
         historique = self._construire_historique(conversation)
@@ -100,80 +215,71 @@ class RAGService:
         if historique:
             messages_api += historique
 
-        if self._est_conversationnel(question):
-            messages_api.append({"role": "user", "content": question})
-            return messages_api
-
-        if self._est_hors_contexte(question):
+        if self._est_conversationnel(question) or self._est_hors_contexte(question):
             messages_api.append({"role": "user", "content": question})
             return messages_api
 
         chunks = self._chercher_contexte(question)
+        chunks = self._reranker_chunks(chunks)
 
         if chunks:
-            contexte = "\n\n".join([
-                f"[Art. {c.numero_page}] {c.contenu}" for c in chunks
-            ])
-            user_content = f"""[EXTRAITS DOCUMENTS JURIDIQUES]
+            contexte = self._construire_contexte(chunks)
+            user_content = f"""TEXTES DE LOI PERTINENTS :
 {contexte}
 
-[QUESTION]
-{question}
+QUESTION : {question}
 
-Analyse ces extraits et réponds clairement. Ne recopie pas le texte brut."""
+Analyse ces textes et réponds clairement en citant les articles précis."""
         else:
             user_content = f"""{question}
 
-(Aucun extrait trouvé — réponds depuis tes connaissances générales en droit burkinabè)"""
+[Aucun texte de loi trouvé. Réponds depuis tes connaissances générales du droit burkinabè en étant honnête sur cette limite.]"""
 
         messages_api.append({"role": "user", "content": user_content})
         return messages_api
 
     def repondre(self, question: str, conversation) -> str:
-        # Vérifier le cache pour les questions juridiques
         cache_key = None
         if not self._est_conversationnel(question) and not self._est_hors_contexte(question):
             cache_key = self._get_cache_key(question)
             cached = cache.get(cache_key)
             if cached:
-                Message.objects.create(
-                    conversation=conversation, role='user', contenu=question)
-                Message.objects.create(
-                    conversation=conversation, role='assistant', contenu=cached)
+                Message.objects.create(conversation=conversation, role='user', contenu=question)
+                Message.objects.create(conversation=conversation, role='assistant', contenu=cached)
                 return cached
 
-        # Appel API
         messages_api = self._construire_messages(question, conversation)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages_api,
-            max_tokens=1500,
-            temperature=0.5,
+            max_tokens=2000,
+            temperature=0.7,
+            top_p=0.9,
         )
         reponse_text = response.choices[0].message.content
 
-        # Mettre en cache
         if cache_key:
             cache.set(cache_key, reponse_text, timeout=3600)
 
-        # Sauvegarder les messages
-        Message.objects.create(
-            conversation=conversation, role='user', contenu=question)
-        Message.objects.create(
-            conversation=conversation, role='assistant', contenu=reponse_text)
+        Message.objects.create(conversation=conversation, role='user', contenu=question)
+        Message.objects.create(conversation=conversation, role='assistant', contenu=reponse_text)
+
+        if not conversation.titre:
+            conversation.titre = question[:100]
+            conversation.save()
 
         return reponse_text
 
     def repondre_stream(self, question: str, conversation):
-        import json
         messages_api = self._construire_messages(question, conversation)
         reponse_complete = ""
 
         stream = self.client.chat.completions.create(
             model=self.model,
             messages=messages_api,
-            max_tokens=1500,
-            temperature=0.5,
+            max_tokens=2000,
+            temperature=0.7,
+            top_p=0.9,
             stream=True,
         )
 
@@ -183,10 +289,8 @@ Analyse ces extraits et réponds clairement. Ne recopie pas le texte brut."""
                 reponse_complete += delta.content
                 yield f"data: {json.dumps({'text': delta.content})}\n\n"
 
-        Message.objects.create(
-            conversation=conversation, role='user', contenu=question)
-        Message.objects.create(
-            conversation=conversation, role='assistant', contenu=reponse_complete)
+        Message.objects.create(conversation=conversation, role='user', contenu=question)
+        Message.objects.create(conversation=conversation, role='assistant', contenu=reponse_complete)
 
         if not conversation.titre:
             conversation.titre = question[:100]
