@@ -1,0 +1,21 @@
+name: Deploy FasoX IA
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@master
+        with:
+          host: 167.233.56.193
+          username: root
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            cd /app
+            git pull origin master
+            docker compose down
+            docker compose up --build -d
