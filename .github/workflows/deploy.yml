@@ -13,7 +13,7 @@ jobs:
         with:
           host: 167.233.56.193
           username: root
-          password: ${{ secrets.VPS_PASSWORD }}
+          password: ${{ secrets.ROOT }}
           script: |
             cd /app
             git pull origin master
