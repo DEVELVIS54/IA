@@ -32,7 +32,11 @@ for chemin, titre, categorie in DOCS:
         doc.fichier = chemin
         doc.save()
     print(f"\nIndexation: {titre}")
-    n = service.indexer_document(doc)
+    try:
+      n = service.indexer_document(doc)
+    except Exception as e:
+     print(f"ERREUR: {e}")
+    n = 0
     total += n
     print(f"OK: {n} chunks")
 
