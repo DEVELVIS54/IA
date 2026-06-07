@@ -6,8 +6,9 @@ from openai import OpenAI
 from django.conf import settings
 from pgvector.django import CosineDistance
 from django.db.models import Q
-from juridique.models import ChunkDocument, Message
+from juridique.models import ChunkDocument, Message, LogEchecRAG
 from .embedding_service import EmbeddingService
+
 SYSTEM_PROMPT = """Tu es FasoX IA — l'assistant juridique de référence au Burkina Faso, créé par SEBGO Elvis.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -66,7 +67,9 @@ MOTS_CONV = [
     'bonjour', 'bonsoir', 'salut', 'merci', 'au revoir', 'bonne journée',
     'bonne nuit', 'comment vas', 'ça va', 'ok', 'super', 'parfait',
     "d'accord", 'compris', 'très bien', 'bien reçu', 'entendu', 'bravo',
-    'aide-moi', 'aide moi', 'qui es-tu', 'qui es tu', 'présente-toi'
+    'aide-moi', 'aide moi', 'qui es-tu', 'qui es tu', 'présente-toi',
+    'developpeur', 'createur', 'qui ta', "qui t'a", 'comment tu',
+    'tu es quoi', 'keskon', 'il cest qui', 'il c\'est qui'
 ]
 
 MOTS_HORS_CONTEXTE = [
@@ -93,10 +96,10 @@ class RAGService:
         q = question.lower().strip()
         if len(question.split()) <= 4:
             return True
-        return any(q.startswith(m) or q == m for m in MOTS_CONV)
+        return any(mot in q for mot in MOTS_CONV)
 
     def _get_cache_key(self, question: str) -> str:
-        return f"fasox_v3_{hashlib.md5(question.lower().strip().encode()).hexdigest()}"
+        return f"fasox_v5_{hashlib.md5(question.lower().strip().encode()).hexdigest()}"
 
     def _expand_query(self, question: str) -> list:
         try:
@@ -106,10 +109,7 @@ class RAGService:
                 return cached
             response = self.client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[{
-                    "role": "user",
-                    "content": QUERY_EXPANSION_PROMPT.format(question=question)
-                }],
+                messages=[{"role": "user", "content": QUERY_EXPANSION_PROMPT.format(question=question)}],
                 max_tokens=200,
                 temperature=0.3,
             )
@@ -147,7 +147,6 @@ class RAGService:
             except Exception:
                 continue
 
-        # Recherche par mots-clés en complément
         mots_cles = [m for m in question.split() if len(m) > 4]
         if mots_cles:
             q_filter = Q()
@@ -179,10 +178,8 @@ class RAGService:
         return filtered[:6]
 
     def _construire_contexte(self, chunks: list) -> str:
-        """Groupe par code de loi sans exposer les noms de fichiers."""
         docs_dict = {}
         for c in chunks:
-            # Utilise le titre du document (ex: "Code Pénal") pas le nom de fichier
             doc_titre = c.document.titre if c.document else "Texte juridique"
             if doc_titre not in docs_dict:
                 docs_dict[doc_titre] = []
@@ -191,7 +188,6 @@ class RAGService:
         parties = []
         for titre, contenus in docs_dict.items():
             texte = "\n".join(contenus)
-            # Titre lisible sans révéler l'architecture
             parties.append(f"[{titre}]\n{texte}")
 
         return "\n\n".join(parties)
@@ -230,6 +226,16 @@ QUESTION : {question}
 
 Analyse ces textes et réponds clairement en citant les articles précis."""
         else:
+            # Log échec RAG
+            try:
+                LogEchecRAG.objects.create(
+                    question=question,
+                    utilisateur=conversation.utilisateur,
+                    score_max=0.0
+                )
+            except Exception:
+                pass
+
             user_content = f"""{question}
 
 [Aucun texte de loi trouvé. Réponds depuis tes connaissances générales du droit burkinabè en étant honnête sur cette limite.]"""

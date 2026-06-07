@@ -29,6 +29,40 @@ class Message(models.Model):
     def __str__(self):
         return f"{self.role} - {self.contenu[:50]}"
 
+class FeedbackMessage(models.Model):
+    """Feedback 👍/👎 sur les réponses de l'IA."""
+    VOTES = [('positif', '👍'), ('negatif', '👎')]
+    message = models.OneToOneField(
+        Message,
+        on_delete=models.CASCADE,
+        related_name='feedback'
+    )
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='feedbacks'
+    )
+    vote = models.CharField(max_length=10, choices=VOTES)
+    commentaire = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.vote} - {self.message.contenu[:50]}"
+
+class LogEchecRAG(models.Model):
+    """Enregistre les questions sans bonne réponse RAG."""
+    question = models.TextField()
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='echecs_rag'
+    )
+    score_max = models.FloatField(default=0.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.question[:80]} (score: {self.score_max})"
+
 class DocumentJuridique(models.Model):
     CATEGORIES = [
         ('code_penal', 'Code Pénal'),
