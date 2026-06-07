@@ -10,6 +10,8 @@ from openai import OpenAI
 from pypdf import PdfReader
 from .models import DocumentUtilisateur
 from .serializers import DocumentUploadSerializer, DocumentSerializer
+from juridique.models import Conversation, Message
+from juridique.services.rag_service import RAGService
 
 ANALYSE_PROMPT = """Tu es FasoX IA, expert juridique burkinabè de haut niveau.
 
@@ -58,6 +60,10 @@ Analyse ce document avec une précision chirurgicale et structure ta réponse ai
 Justifie en une phrase.
 
 ---
+TEXTES DE LOI PERTINENTS :
+{lois}
+
+---
 DOCUMENT À ANALYSER :
 {texte}
 
@@ -76,14 +82,12 @@ class DocumentUploadView(APIView):
 
         fichier = request.FILES['fichier']
 
-        # Vérification type de fichier
         if not fichier.name.lower().endswith('.pdf'):
             return Response(
                 {'erreur': 'Seuls les fichiers PDF sont acceptés.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Vérification taille (max 10 Mo)
         if fichier.size > 10 * 1024 * 1024:
             return Response(
                 {'erreur': 'Le fichier ne doit pas dépasser 10 Mo.'},
@@ -99,13 +103,16 @@ class DocumentUploadView(APIView):
         )
 
         try:
-            # Extraction intelligente du texte
             texte = self._extraire_texte(document.fichier.path)
 
             if not texte.strip():
                 raise ValueError("Le PDF ne contient pas de texte extractible. Il est peut-être scanné.")
 
-            # Analyse avec Groq
+            # RAG — chercher les lois pertinentes dans le contexte du document
+            rag = RAGService()
+            chunks = rag._chercher_contexte(texte[:500])
+            lois = rag._construire_contexte(chunks) if chunks else "Aucune loi trouvée automatiquement."
+
             client = OpenAI(
                 api_key=settings.GROQ_API_KEY,
                 base_url="https://api.groq.com/openai/v1"
@@ -120,7 +127,7 @@ class DocumentUploadView(APIView):
                     },
                     {
                         "role": "user",
-                        "content": ANALYSE_PROMPT.format(texte=texte)
+                        "content": ANALYSE_PROMPT.format(texte=texte, lois=lois)
                     }
                 ],
                 max_tokens=3000,
@@ -128,11 +135,35 @@ class DocumentUploadView(APIView):
             )
 
             analyse = response.choices[0].message.content
+
+            # Créer une conversation pour permettre le suivi
+            conversation = Conversation.objects.create(
+                utilisateur=request.user,
+                titre=f"Document : {fichier.name[:50]}"
+            )
+
+            # Ajouter le contexte du document et l'analyse comme premiers messages
+            Message.objects.create(
+                conversation=conversation,
+                role='user',
+                contenu=f"Analyse ce document : {fichier.name}\n\n[CONTENU DU DOCUMENT]\n{texte[:3000]}"
+            )
+            Message.objects.create(
+                conversation=conversation,
+                role='assistant',
+                contenu=analyse
+            )
+
             document.resultat_analyse = analyse
+            document.texte_extrait = texte[:5000]
+            document.conversation = conversation
             document.statut = 'analyse'
             document.save()
 
-            return Response(DocumentSerializer(document).data, status=status.HTTP_200_OK)
+            data = DocumentSerializer(document).data
+            data['conversation_id'] = conversation.id
+
+            return Response(data, status=status.HTTP_200_OK)
 
         except ValueError as e:
             document.statut = 'erreur'
@@ -159,7 +190,6 @@ class DocumentUploadView(APIView):
 
         texte_complet = "\n\n".join(parties)
 
-        # Limite intelligente : garde début + fin du document
         if len(texte_complet) > 15000:
             debut = texte_complet[:10000]
             fin = texte_complet[-3000:]

@@ -1,7 +1,4 @@
 from django.db import models
-
-# Create your models here.
-from django.db import models
 from django.conf import settings
 
 class DocumentUtilisateur(models.Model):
@@ -20,6 +17,13 @@ class DocumentUtilisateur(models.Model):
     taille = models.IntegerField(default=0)
     statut = models.CharField(max_length=20, choices=STATUTS, default='en_attente')
     resultat_analyse = models.TextField(blank=True)
+    texte_extrait = models.TextField(blank=True)
+    conversation = models.ForeignKey(
+        'juridique.Conversation',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='document_source'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
