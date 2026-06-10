@@ -78,7 +78,7 @@ MOTS_HORS_CONTEXTE = [
     'programmation', 'crypto', 'bitcoin', 'blague', 'amour'
 ]
 
-
+#classe de rag service
 class RAGService:
     def __init__(self):
         self.embedding_service = EmbeddingService()
